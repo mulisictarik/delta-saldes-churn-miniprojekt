@@ -1,0 +1,15 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: tarik-mulisic
+
+resources:
+  - deployment.yaml
+  - service.yaml
+  - ingress.yaml
+
+# Taggen sätts av pipelinen med: kustomize edit set image churn=<image>:<SHA>
+images:
+  - name: churn
+    newName: ghcr.io/mulisictarik/delta-saldes-churn-miniprojekt
+    newTag: satts-av-pipelinen

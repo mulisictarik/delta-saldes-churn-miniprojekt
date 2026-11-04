@@ -125,7 +125,7 @@ jobs:
       packages: write
     env:
       # Taggen är commitens SHA, så imagen går att spåra till koden och modellen.
-      IMAGE: ghcr.io/hencyber/delta-saldes-churn:${{ github.sha }}
+      IMAGE: ghcr.io/mulisictarik/delta-saldes-churn-miniprojekt:${{ github.sha }}
     steps:
       - uses: actions/checkout@v7
 
@@ -191,3 +191,133 @@ jobs:
           push: ${{ github.ref == 'refs/heads/main' && github.event_name != 'pull_request' }}
           tags: ${{ env.IMAGE }}
           cache-from: type=gha
+
+  staging:
+    # Samma manifest och samma image provas i ett kind-kluster på runnern innan produktion.
+    needs: docker
+    runs-on: ubuntu-latest
+    env:
+      NAMESPACE: tarik-mulisic
+      IMAGE: churn:${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: modell-${{ github.sha }}
+          path: outputs
+
+      - uses: docker/setup-buildx-action@v4
+
+      # Lagren finns redan i cachen från docker-jobbet, så bygget går på några sekunder.
+      - name: Bygg imagen för kind
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64
+          load: true
+          tags: ${{ env.IMAGE }}
+          cache-from: type=gha
+
+      - name: Starta kind
+        uses: helm/kind-action@v1
+        with:
+          cluster_name: staging
+
+      - name: Ladda in imagen i kind
+        run: kind load docker-image "$IMAGE" --name staging
+
+      - name: Rulla ut med Kustomize
+        working-directory: k8s
+        run: |
+          kustomize edit set image churn="$IMAGE"
+          kubectl create namespace "$NAMESPACE"
+          kubectl apply -k .
+          kubectl -n "$NAMESPACE" rollout status deployment/churn --timeout=180s
+
+      - name: Smoke-test mot servicen
+        run: |
+          kubectl -n "$NAMESPACE" port-forward svc/churn 8080:80 &
+          for i in $(seq 1 20); do curl -sf localhost:8080/health && break; sleep 1; done
+          curl -sf localhost:8080/health | tee health.json
+          python3 -c "import json, sys; c = json.load(open('health.json'))['commit']; sys.exit(c != '${{ github.sha }}')"
+          curl -sf -X POST localhost:8080/predict \
+            -H "Content-Type: application/json" \
+            -d '{"alder": 30, "region": "Stockholm", "abonnemang": "Bas", "manader_som_kund": 3, "manadskostnad": 149.0, "data_gb_per_manad": 12.5, "supportarenden_12m": 4}' \
+            | tee svar.json
+          python3 -c "import json; r = json.load(open('svar.json'))['risk']; assert 0 <= r <= 1, r"
+
+      - name: Visa läget i klustret om något fallerar
+        if: failure()
+        run: |
+          kubectl -n "$NAMESPACE" get all
+          kubectl -n "$NAMESPACE" describe deployment churn
+          kubectl -n "$NAMESPACE" logs -l app=churn --tail=50
+
+  deploy:
+    needs: staging
+    # Bara push till main. En pull request når aldrig klustret.
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    # Miljön kräver mitt godkännande och det är bara här KUBECONFIG kan läsas.
+    environment:
+      name: produktion
+      url: https://tarik-mulisic.89-167-53-206.sslip.io/health
+    # Två utrullningar får aldrig köras samtidigt mot klustret.
+    concurrency:
+      group: produktion
+      cancel-in-progress: false
+    env:
+      NAMESPACE: tarik-mulisic
+      IMAGE: ghcr.io/mulisictarik/delta-saldes-churn-miniprojekt:${{ github.sha }}
+      URL: https://tarik-mulisic.89-167-53-206.sslip.io
+    steps:
+      - uses: actions/checkout@v7
+
+      # Filen finns bara under jobbet och tas bort med runnern.
+      - name: Skriv kubeconfig
+        env:
+          KUBECONFIG_DATA: ${{ secrets.KUBECONFIG }}
+        run: |
+          mkdir -p "$HOME/.kube"
+          printf '%s\n' "$KUBECONFIG_DATA" > "$HOME/.kube/config"
+          chmod 600 "$HOME/.kube/config"
+          kubectl -n "$NAMESPACE" get deployments
+
+      - name: Rulla ut med Kustomize
+        id: apply
+        working-directory: k8s
+        run: |
+          kustomize edit set image churn="$IMAGE"
+          kubectl apply -k .
+          kubectl -n "$NAMESPACE" annotate deployment/churn \
+            kubernetes.io/change-cause="pipeline: ${GITHUB_SHA::7}" --overwrite
+
+      - name: Vänta på utrullningen
+        run: kubectl -n "$NAMESPACE" rollout status deployment/churn --timeout=300s
+
+      # Tjänsten ska svara med exakt den commit som just testades.
+      - name: Kontrollera /health
+        run: |
+          for i in $(seq 1 24); do
+            commit=$(curl -sf "$URL/health" | python3 -c "import json, sys; print(json.load(sys.stdin)['commit'])" || true)
+            echo "försök $i: $commit"
+            [ "$commit" = "$GITHUB_SHA" ] && exit 0
+            sleep 5
+          done
+          exit 1
+
+      - name: Skriv utrullningen i sammanfattningen
+        run: |
+          echo "## Utrullning" >> "$GITHUB_STEP_SUMMARY"
+          echo "Image: \`$IMAGE\`" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          kubectl -n "$NAMESPACE" rollout history deployment/churn >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      # Bara om något faktiskt har applicerats. Fallerar det före apply finns inget att rulla tillbaka.
+      - name: Rulla tillbaka vid fel
+        if: failure() && steps.apply.outcome == 'success'
+        run: |
+          kubectl -n "$NAMESPACE" rollout undo deployment/churn
+          kubectl -n "$NAMESPACE" rollout status deployment/churn --timeout=300s

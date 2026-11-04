@@ -1,0 +1,25 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: churn
+  labels:
+    app: churn
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt
+spec:
+  ingressClassName: traefik
+  tls:
+    - hosts:
+        - tarik-mulisic.89-167-53-206.sslip.io
+      secretName: churn-tls
+  rules:
+    - host: tarik-mulisic.89-167-53-206.sslip.io
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: churn
+                port:
+                  name: http
