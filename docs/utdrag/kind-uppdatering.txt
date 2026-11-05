@@ -1,0 +1,18 @@
+$ kubectl apply -k .   (version 2: 4bfb02d)
+service/churn unchanged
+deployment.apps/churn configured
+ingress.networking.k8s.io/churn unchanged
+deployment.apps/churn annotated
+$ kubectl rollout status deployment/churn
+Waiting for deployment "churn" rollout to finish: 1 out of 2 new replicas have been updated...
+Waiting for deployment "churn" rollout to finish: 1 out of 2 new replicas have been updated...
+Waiting for deployment "churn" rollout to finish: 1 out of 2 new replicas have been updated...
+Waiting for deployment "churn" rollout to finish: 1 old replicas are pending termination...
+Waiting for deployment "churn" rollout to finish: 1 old replicas are pending termination...
+deployment "churn" successfully rolled out
+$ kubectl rollout history deployment/churn
+deployment.apps/churn 
+REVISION  CHANGE-CAUSE
+1         version 1: 18ac4e1
+2         version 2: 4bfb02d
+

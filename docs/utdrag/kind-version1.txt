@@ -1,0 +1,13 @@
+$ kubectl apply -k .
+service/churn created
+deployment.apps/churn created
+ingress.networking.k8s.io/churn created
+deployment.apps/churn annotated
+$ kubectl rollout status deployment/churn
+Waiting for deployment "churn" rollout to finish: 0 of 2 updated replicas are available...
+Waiting for deployment "churn" rollout to finish: 1 of 2 updated replicas are available...
+deployment "churn" successfully rolled out
+$ kubectl get pods
+NAME                     READY   STATUS    RESTARTS   AGE
+churn-68f97fb469-24fgh   1/1     Running   0          21s
+churn-68f97fb469-cldlx   1/1     Running   0          21s
